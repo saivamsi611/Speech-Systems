@@ -1,0 +1,9 @@
+openai-whisper
+torch
+sounddevice
+numpy
+scipy
+pyttsx3
+webrtcvad
+noisereduce
+soundfile
