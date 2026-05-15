@@ -1,8 +1,4 @@
-"""
-Live Speech-to-Text Conversion - Low Latency Implementation
-Uses faster-whisper (optimized Whisper model)
-Works offline, very low latency
-"""
+
 
 import sounddevice as sd
 import numpy as np
