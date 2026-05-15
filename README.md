@@ -365,14 +365,3 @@ Possible upgrades:
 - Live subtitle UI
 - GPU streaming inference
 
----
-
-# 📄 License
-
-This project is for educational and learning purposes.
-
----
-
-# 👨‍💻 Author
-
-Developed as a real-time AI Speech Systems learning project.
