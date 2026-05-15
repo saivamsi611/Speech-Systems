@@ -1,136 +1,141 @@
-import time
+"""
+Live Speech-to-Text Conversion - Low Latency Implementation
+Uses faster-whisper (optimized Whisper model)
+Works offline, very low latency
+"""
+
+import sounddevice as sd
 import numpy as np
+from faster_whisper import WhisperModel
+import queue
+import threading
+import sys
 
-from audio.recorder import (
-    start_recording,
-    audio_queue,
-    SAMPLE_RATE
-)
+class FastSpeechToText:
+    def __init__(self, model_size="base", device="cpu", compute_type="int8"):
+        print(f"Loading {model_size} model... This may take a moment.")
+        self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        print("Model loaded successfully!")
+        
+        # Audio settings
+        self.sample_rate = 16000  # Whisper expects 16kHz
+        self.chunk_duration = 3  # Process every 3 seconds
+        self.audio_queue = queue.Queue()
+        self.is_running = False
+        
+        # Buffer for audio
+        self.audio_buffer = []
+        
+        # Transcription settings
+        self.transcript_file = "transcription.txt"
+        with open(self.transcript_file, "w") as f:
+            f.write("")  # Clear file on startup
+        print(f"Transcription will be saved to: {self.transcript_file}")
+        
+    def audio_callback(self, indata, frames, time, status):
+        """Callback for audio stream"""
+        if status:
+            print(f"Audio status: {status}", file=sys.stderr)
+        
+        # Convert to mono and append to buffer
+        audio_chunk = indata[:, 0].copy()
+        self.audio_buffer.extend(audio_chunk)
+        
+        # If buffer has enough data, queue it for processing
+        samples_needed = int(self.chunk_duration * self.sample_rate)
+        if len(self.audio_buffer) >= samples_needed:
+            audio_data = np.array(self.audio_buffer[:samples_needed], dtype=np.float32)
+            self.audio_queue.put(audio_data)
+            self.audio_buffer = self.audio_buffer[samples_needed:]
+    
+    def process_audio(self):
+        """Process audio from queue"""
+        while self.is_running:
+            try:
+                audio_data = self.audio_queue.get(timeout=1)
+                
 
-from stt.whisper_engine import transcribe
-
-# IMPORT WHOLE MODULE
-import tts.speaker as speaker
-
-print("Loading AI Voice Assistant...")
-
-# =========================
-# START MICROPHONE
-# =========================
-
-stream = start_recording()
-
-print("\n=====================================================")
-print("Assistant Started & Listening!")
-print("Ensure your microphone is connected.")
-print("Speak something clearly...")
-print("=====================================================\n")
-
-# Configurable Volume Threshold to filter background noise
-# (0.015 is a good default; raise it if your environment is loud, lower it if you speak softly)
-VOLUME_THRESHOLD = 0.015
-
-try:
-
-    while True:
-
-        # =========================
-        # PAUSE WHILE SPEAKING
-        # =========================
-
-        if speaker.speaking:
-            time.sleep(0.1)
-            continue
-
-        # =========================
-        # CHECK AUDIO QUEUE
-        # =========================
-
-        if not audio_queue.empty():
-
-            # Prevent backlog: if there are multiple chunks queued (e.g., Whisper took too long),
-            # discard the oldest chunks to ensure the system stays real-time!
-            backlog_size = audio_queue.qsize()
-            if backlog_size > 2:
-                print(f"\n[System] Slow processing detected ({backlog_size} chunks). Draining queue to keep real-time...")
-                while audio_queue.qsize() > 1:
-                    try:
-                        audio_queue.get_nowait()
-                    except:
-                        pass
-
-            audio_chunk = audio_queue.get()
-
-            # =========================
-            # VOLUME THRESHOLD
-            # =========================
-            # Calculate RMS amplitude to check if there is actual voice
-            rms = np.sqrt(np.mean(audio_chunk**2))
-            
-            # Print continuous mic volume indicator to help user debug input
-            print(f"\rListening... (Mic Volume: {rms:.4f})", end="", flush=True)
-
-            if rms < VOLUME_THRESHOLD:
-                # It is silence or low ambient noise, skip transcription entirely!
+                # Transcribe with faster-whisper
+                # Use keywords for context instead of a full sentence to prevent the model from repeating it
+                initial_prompt = "live captioning, conversation, accurate, English, clear_speech, no_hallucinations, AI, machine_learning, sequence-to-sequence, Whisper, token, context"
+                
+                segments, info = self.model.transcribe(
+                    audio_data,
+                    beam_size=5, # Higher accuracy
+                    language="en",
+                    initial_prompt=initial_prompt,
+                    condition_on_previous_text=False, # distinct chunks, prevents looping
+                    vad_filter=True,
+                    vad_parameters=dict(
+                        threshold=0.5,
+                        min_speech_duration_ms=250,
+                        min_silence_duration_ms=500
+                    )
+                )
+                
+                # Print results
+                text_parts = []
+                for segment in segments:
+                    text_parts.append(segment.text.strip())
+                
+                if text_parts:
+                    full_text = " ".join(text_parts)
+                    
+                    # Filter out hallucinations (if it repeats the prompt or previous text)
+                    if full_text and len(full_text) > 2:
+                        # Check if it's just repeating keywords from our prompt
+                        if "live captioning" in full_text.lower() and "conversation" in full_text.lower():
+                            continue
+                            
+                        print(f"You said: {full_text}")
+                        sys.stdout.flush()
+                        
+                        # Save to file
+                        with open(self.transcript_file, "a") as f:
+                            f.write(full_text + " ")
+                        
+            except queue.Empty:
                 continue
+            except Exception as e:
+                print(f"Error processing audio: {e}", file=sys.stderr)
+    
+    def start(self):
+        """Start live speech recognition"""
+        self.is_running = True
+        
+        # Start processing thread
+        processing_thread = threading.Thread(target=self.process_audio)
+        processing_thread.daemon = True
+        processing_thread.start()
+        
+        print("\n=== Fast Live Speech-to-Text Started ===")
+        print(f"Using model: faster-whisper (small)")
+        print(f"Sample rate: {self.sample_rate} Hz")
+        print(f"Processing chunks: {self.chunk_duration} seconds")
+        print("\nSpeak into your microphone. Press Ctrl+C to stop.\n")
+        
+        try:
+            # Start audio stream
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                callback=self.audio_callback,
+                blocksize=int(self.sample_rate * 0.2)  # 200ms blocks (prevents overflow)
+            ):
+                while self.is_running:
+                    threading.Event().wait(1)
+        except KeyboardInterrupt:
+            self.stop()
+    
+    def stop(self):
+        """Stop speech recognition"""
+        print("\n\nStopping speech recognition...")
+        self.is_running = False
+        print("Stopped.")
 
-            print("\n[System] Processing speech...")
-
-            # =========================
-            # SPEECH TO TEXT
-            # =========================
-
-            text = transcribe(
-                audio_chunk,
-                SAMPLE_RATE
-            )
-
-            text = text.strip()
-
-            # =========================
-            # IGNORE SMALL NOISES
-            # =========================
-
-            if len(text) > 2:
-
-                print(f"You Said: {text}")
-
-                # =========================
-                # AI RESPONSE
-                # =========================
-
-                response = f"You said {text}"
-
-                print(f"Assistant: {response}")
-
-                # =========================
-                # TEXT TO SPEECH
-                # =========================
-
-                speaker.speak(response)
-                
-                # =========================
-                # PREVENT SELF-ECHO LOOP
-                # =========================
-                # While speaking, the mic continues to record.
-                # Drain the queue entirely to clear out the sound of the Assistant's own voice.
-                time.sleep(0.1) # Tiny settle delay
-                while not audio_queue.empty():
-                    try:
-                        audio_queue.get_nowait()
-                    except:
-                        pass
-                
-                print("\nReady for next command...")
-
-        # =========================
-        # SMALL DELAY
-        # =========================
-
-        time.sleep(0.01)
-
-except KeyboardInterrupt:
-
-    print("\nStopping Assistant...")
-
-    stream.stop()
+if __name__ == "__main__":
+    # Options: tiny (fastest), base, small, medium, large-v3 (most accurate)
+    # For minimum latency, use "tiny" or "base"
+    # Switched to 'small' for better accuracy with technical terms
+    stt = FastSpeechToText(model_size="small", device="cpu", compute_type="int8")
+    stt.start()
