@@ -1,6 +1,0 @@
-faster-whisper
-sounddevice
-numpy
-pyttsx3
-ctranslate2
-av
